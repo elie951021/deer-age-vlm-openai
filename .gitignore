@@ -1,0 +1,5 @@
+api/.venv
+ui/.venv
+api/upload/
+api/logs
+__pycache__
