@@ -117,10 +117,10 @@ async def estimate_deer_age(file: UploadFile, usermail: Optional[str] = None) ->
     session = RequestSession()
     try:
         image_bytes = await file.read()
+        image = Image.open(BytesIO(image_bytes)).convert('RGB')
         image_bytes = normalize_image(image_bytes)
         session.save_image(image_bytes)
         base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
         # try:
         #     contents = await file.read()
         #     image = Image.open(BytesIO(contents)).convert('RGB')
@@ -139,7 +139,7 @@ async def estimate_deer_age(file: UploadFile, usermail: Optional[str] = None) ->
             suffix = '.jpg'
         random_filename = f"{uuid4().hex}{suffix}"
         image_path = date_folder / random_filename
-        image_bytes.save(str(image_path))
+        image.save(str(image_path))
 
         BASE_DIR = Path(__file__).resolve().parent
         few_shot_base64 = encode_image(BASE_DIR / "few_shot.jpg")
