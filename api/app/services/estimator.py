@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import torch
+import torch.nn as nn
+from torchvision import transforms
 from datetime import datetime
 from uuid import uuid4
 from typing import Optional
@@ -22,11 +25,30 @@ from app.schemas import EstimationResponse
 from app.utils.image import normalize_image
 from PIL import Image
 
+try:
+    from torchvision.models import mobilenet_v3_small, resnet18
+    try:
+        from torchvision.models import MobileNet_V3_Small_Weights, ResNet18_Weights
+        HAS_WEIGHTS_ENUM = True
+    except Exception:
+        HAS_WEIGHTS_ENUM = False
+except Exception as e:
+    raise RuntimeError(f"torchvision is required: {e}")
+
+
 llm = LLMClient(
     model=settings.openai_model,
     api_key=settings.openai_api_key,
     model_kwargs={"response_format": {"type": "json_object"}},
 )
+
+
+
+CHECKPOINT_PATH = os.getenv('CHECKPOINT_PATH', 'checkpoints/best.pt')
+CLASS_MAP_PATH = os.getenv('CLASS_MAP_PATH', 'outputs/class_to_idx.json')
+MODEL_NAME = os.getenv('MODEL_NAME', 'resnet18').lower()
+IMG_SIZE = int(os.getenv('IMG_SIZE', '224'))
+TOP_K = int(os.getenv('TOP_K', '3'))
 
 UPLOAD_DIR = os.getenv('UPLOAD_DIR', 'upload')
 SQLITE_DB_PATH = os.getenv('SQLITE_DB_PATH', 'database/app.db')
@@ -78,6 +100,59 @@ AGE_CLASS_INFO = {
     }
 }
 
+def build_transform(img_size: int = 224):
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    return transforms.Compose([
+        transforms.Resize(int(img_size * 1.14)),
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+
+def load_model(checkpoint_path: str, num_classes: int, model_name: str):
+    model_name = model_name.lower()
+    if model_name == 'mobilenet_v3_small':
+        model = mobilenet_v3_small(weights=None) if HAS_WEIGHTS_ENUM else mobilenet_v3_small(pretrained=False)
+        if hasattr(model, 'classifier') and isinstance(model.classifier, nn.Sequential):
+            last_idx = None
+            for i in reversed(range(len(model.classifier))):
+                if isinstance(model.classifier[i], nn.Linear):
+                    last_idx = i
+                    break
+            if last_idx is None:
+                raise RuntimeError("Could not locate final Linear layer in classifier.")
+            in_features = model.classifier[last_idx].in_features
+            model.classifier[last_idx] = nn.Linear(in_features, num_classes)
+    elif model_name == 'resnet18':
+        model = resnet18(pretrained=True)
+        in_features = model.fc.in_features
+        model.fc = nn.Linear(in_features, num_classes)
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    state = torch.load(checkpoint_path, map_location='cpu')
+    model.load_state_dict(state['model_state'], strict=True)
+    model.eval()
+    return model
+
+def init_model():
+    global model, idx_to_class, tfm, device
+
+    if not os.path.exists(CHECKPOINT_PATH):
+        raise RuntimeError(f"Checkpoint not found: {CHECKPOINT_PATH}")
+    if not os.path.exists(CLASS_MAP_PATH):
+        raise RuntimeError(f"Class map not found: {CLASS_MAP_PATH}")
+
+    with open(CLASS_MAP_PATH, 'r', encoding='utf-8') as f:
+        class_to_idx = json.load(f)
+    idx_to_class = {v: k for k, v in class_to_idx.items()}
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = load_model(CHECKPOINT_PATH, num_classes=len(idx_to_class), model_name=MODEL_NAME).to(device)
+    tfm = build_transform(IMG_SIZE)
+    print("XXXXXXXXXXXXXXXXXX")
 
 def encode_image(path):
     with open(path, "rb") as f:
@@ -397,6 +472,78 @@ def get_prediction_history_by_usermail(db_path: str, usermail: str):
         })
 
     return history
+
+
+def get_all_predictions(
+    db_path: str,
+    usermail: Optional[str] = None,
+    has_feedback: Optional[bool] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    conditions: list[str] = []
+    params: list = []
+
+    if usermail:
+        conditions.append("lower(usermail) LIKE lower(?)")
+        params.append(f"%{usermail.strip()}%")
+
+    if has_feedback is True:
+        conditions.append("(feedback IS NOT NULL AND trim(feedback) != '')")
+    elif has_feedback is False:
+        conditions.append("(feedback IS NULL OR trim(feedback) = '')")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        total = conn.execute(
+            f"SELECT COUNT(*) AS count FROM predictions {where_clause}",
+            params,
+        ).fetchone()["count"]
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                id,
+                usermail,
+                created_at,
+                original_filename,
+                saved_filename,
+                saved_image_path,
+                age_estimate,
+                confidence,
+                reliability,
+                feedback,
+                exact_age,
+                reply
+            FROM predictions
+            {where_clause}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+
+    predictions = []
+    for row in rows:
+        predictions.append({
+            "id": row["id"],
+            "usermail": row["usermail"],
+            "created_at": row["created_at"],
+            "original_filename": row["original_filename"],
+            "saved_image_url": to_upload_url(row["saved_image_path"]),
+            "feedback": row["feedback"],
+            "exact_age": row["exact_age"],
+            "reply": row["reply"],
+            "prediction": {
+                "age_estimate": row["age_estimate"],
+                "confidence": row["confidence"],
+                "reliability": row["reliability"],
+            },
+        })
+
+    return predictions, total
 
 
 def clear_prediction_history_by_usermail(db_path: str, usermail: str) -> int:

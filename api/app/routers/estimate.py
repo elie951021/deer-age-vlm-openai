@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, 
 from fastapi.responses import JSONResponse
 from app.services.estimator import clear_prediction_history_by_usermail, estimate_deer_age, save_prediction_feedback, get_prediction_history_by_usermail
 from typing import Optional
-from app.services.estimator import init_database, SQLITE_DB_PATH
+from app.services.estimator import init_database, SQLITE_DB_PATH, init_model
 
 router = APIRouter()
 
@@ -24,6 +24,7 @@ async def estimate(
 @router.on_event("startup")
 def startup_event():
     init_database(SQLITE_DB_PATH)
+    init_model()  # Initialize the model on startup
 
 @router.post('/feedback')
 async def submit_feedback(
