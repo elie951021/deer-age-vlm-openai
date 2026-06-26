@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pathlib import Path
 from app.services.estimator import UPLOAD_DIR
-from app.routers import estimate
+from app.routers import admin, estimate, train
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -21,6 +21,8 @@ app.add_middleware(
 )
 
 app.include_router(estimate.router, prefix="/api")
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(train.router, prefix="/api", tags=["train"])
 
 if Path(UPLOAD_DIR).exists():
     app.mount("/upload", StaticFiles(directory=UPLOAD_DIR), name="upload")

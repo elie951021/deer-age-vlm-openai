@@ -1,3 +1,7 @@
+torch
+torchvision
+numpy
+tqdm
 fastapi==0.135.3
 uvicorn[standard]==0.44.0
 python-multipart==0.0.24
